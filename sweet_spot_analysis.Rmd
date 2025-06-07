@@ -9,3 +9,310 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+
+## Load Libraries and Themes
+
+```{r libraries}
+pacman::p_load(
+  tidyverse,
+  dbplyr,
+  DBI,
+  odbc, 
+  lubridate,
+  plotly
+  
+)
+
+theme_set(theme_bw())
+set.seed(1234)
+
+options(scipen=999) # eliminates scientific notation formatting
+
+```
+
+
+## To Do
+
+- pull in ACG
+- pull in cost data from claims
+- pull in Epic
+- add logic to code new/existing patient
+
+
+## Questions
+
+- What, on average, is the difference in cost between new and established patients?
+
+
+## Import and Tidy Data
+
+### Connect to Servers/Databases
+
+```{r odbc connect}
+mcanalytics <- DBI::dbConnect(odbc::odbc()
+                        ,Driver = "ODBC Driver 17 for SQL Server"
+                        ,Server = "DB-PROD-MSO"
+                        ,Database = "MCANALYTICS"
+                        ,Trusted_Connection = "Yes")
+
+mcis <- DBI::dbConnect(odbc::odbc()
+                        ,Driver = "ODBC Driver 17 for SQL Server"
+                        ,Server = "SQL12"
+                        ,Database = "MCIS"
+                        ,Trusted_Connection = "Yes")
+
+altamed_dwh <- DBI::dbConnect(odbc::odbc()
+                        ,Driver = "ODBC Driver 17 for SQL Server"
+                        ,Server = "DB-PROD-DWH"
+                        ,Database = "ALTAMED_DWH"
+                        ,Trusted_Connection = "Yes")
+
+acg <- DBI::dbConnect(odbc::odbc()
+                        ,Driver = "ODBC Driver 17 for SQL Server"
+                        ,Server = "DB-PROD-DWH"
+                        ,Database = "ACG"
+                        ,Trusted_Connection = "Yes")
+
+wakely <- DBI::dbConnect(odbc::odbc()
+                        ,Driver = "ODBC Driver 17 for SQL Server"
+                        ,Server = "DB-PROD-DWH"
+                        ,Database = "Wakely"
+                        ,Trusted_Connection = "Yes")
+
+datalake <- DBI::dbConnect(odbc::odbc()
+                        ,Driver = "ODBC Driver 17 for SQL Server"
+                        ,Server = "DB-PROD-REPORT"
+                        ,Database = "Datalake"
+                        ,Trusted_Connection = "Yes")
+
+clarity <- DBI::dbConnect(odbc::odbc()
+                        ,Driver = "ODBC Driver 17 for SQL Server"
+                        ,Server = "DB-PROD-CLARITY"
+                        ,Database = "CLARITY"
+                        ,Trusted_Connection = "Yes")
+
+
+```
+
+
+### Import Tables
+
+Define interval start date and end date. 
+```{r}
+start_date <- '2024-03-01'
+end_date <- '2025-03-01'
+
+```
+
+#### Epic 
+
+Epic table to crosswalk Patient IDs to EZ Cap IDs
+```{r}
+epic_patient_for_app_crosswalk <-
+  mcis |>
+  tbl(in_schema("dbo", "Epic_Patient_for_App")) |>
+  select(c(PatientSID, EZ_MembID, PatientEpicId, PrimaryMrn)) |>
+#  filter(PatientSID %in% sample_patient_ids) |>
+  collect() |>
+  janitor::clean_names()
+
+```
+
+
+#### MCANALYTICS Tables 
+
+`MCANALYTICS` claims tables
+```{r}
+claim_header <- 
+  mcanalytics |> 
+  tbl(in_schema("data", "tblClaim_Header")) |> 
+  select(c(ClaimNo, DateCreated, DateFrom, MemberId, CompanyId, TotalNet, PlaceofSvcCode, StatusCode)) |> 
+  filter(DateFrom >= start_date & DateFrom <= end_date) |> 
+  filter(CompanyId %in% c("ALTACHLA", "ALTAMED", "ALTANET", "ALTAOC") & StatusCode == '9') |> 
+  collect() |> 
+  janitor::clean_names() |> 
+  filter(!is.na(claim_no))
+  		
+claim_details <-
+  mcanalytics |>
+  tbl(in_schema("data", "tblClaim_Details")) |>
+  select(c(ClaimNo, CompanyId, DateFrom, NetPaid
+           , ProcCode)) |>
+  filter(DateFrom >= start_date & DateFrom <= end_date) |>
+  filter(CompanyId %in% c("ALTACHLA", "ALTAMED", "ALTANET", "ALTAOC")) |>
+  collect() |>
+  janitor::clean_names() |>
+  select(-date_from) |>
+  filter(!is.na(claim_no))
+
+```
+
+
+`MCANALYTICS` `MMS01` table 
+```{r}
+tbl_mms01 <- 
+  mcanalytics |> 
+  tbl(in_schema("rptstg", "tblMMS01")) |> 
+  select(c(CompanyID, YOS, QOS, MOS, MOS_Date, LobCode, LobName, HealthPlanContractCode, HealthPlanContractDescription, HealthPlanName, Memberid, MemberName, MemberZipCode
+        ,BenefitOption
+        ,MedicalProgram
+        ,Sex
+        ,AgeGrp
+        ,Age
+        ,AidCat
+        ,AidCode
+        ,MemberCounty
+        ,MemberRegion
+        ,MMS
+        ,Autono
+        ,MPINO
+        ,DataThrough
+        ,MemberRegionDescription
+        ,Altamed
+        ,AgeGroup2
+        ,Program
+        ,Clinic
+        ,RiskGroup
+        ,PCPCounty
+        ,PCPGeographicRegion
+        ,Region
+        ,MMS_NEW
+        ,MMS_TERM
+        ,MMS_Exist
+        ,MMS_Exist_90day
+)) |> 
+  collect() |> 
+  janitor::clean_names() |> 
+  filter(yos %in% c(2023, 2024, 2025))
+
+```
+
+
+DimPatient Table to crosswalk patient IDs
+```{r}
+dim_patient <- 
+  altamed_dwh |> 
+  tbl(in_schema("dbo", "DimAllPatient")) |> 
+  select(CurrentPatientSID, AllPatientID) |> 
+  collect() |> 
+  janitor::clean_names()
+
+memb_company <- 
+  datalake |> 
+  tbl(in_schema("EZCap", "MEMB_COMPANY")) |> 
+  select(c(MEMB_KEYID, MEMB_MPI_NO, MEMBID, COMPANY_ID)) |> 
+  collect() |> 
+  janitor::clean_names()
+
+patient_id_crosswalk <- 
+  dim_patient |> 
+  left_join(memb_company, by = c("all_patient_id" = "memb_mpi_no")) |> 
+  filter(!is.na(membid)) |> 
+  select(c(current_patient_sid, membid, company_id)) |> 
+  unique()
+
+```
+
+
+
+## Data Exploration
+```{r}
+tbl_mms01 |> 
+  group_by(mms_new) |> 
+  summarise(n = n())
+
+```
+
+Patient 90423751G, flagged as a new member 2024-02 (AltaOC) and  2024-11 (AltaNet), started as AltaOC then has first AltaNet observation, then every Altanet observation is repeated with AltaOC
+```{r}
+tbl_mms01 |> 
+  filter(mms_new == 1) |> 
+  filter(memberid == '90423751G')
+
+tbl_mms01 |> 
+  filter(memberid == '90423751G') |> 
+  arrange(mos_date) |> 
+  select(c(memberid, company_id, region, mos, mms_new, mms_exist, mms_exist_90day))
+
+```
+
+
+```{r}
+# looks like mms_exist_90day might be the correct variable
+mms_90_day_yes <- 
+  tbl_mms01 |> 
+  filter(mms_exist_90day == 0) |> 
+  arrange(memberid)
+
+# member John Le 00000249628
+tbl_mms01 |> 
+  filter(memberid == '00000249628') # new member Jun 2023
+
+# member antonio hernandez, new 2024-04
+tbl_mms01 |> 
+  filter(memberid == '00000239639') |> 
+  select(c(memberid, company_id, region, mos, mms_new, mms_exist, mms_exist_90day))
+
+# member Ana Lopez Melendez, new AltaMed Feb 2024
+tbl_mms01 |> 
+  filter(memberid == '00000170866') |> 
+  select(c(memberid, company_id, region, mos, mms_new, mms_exist, mms_exist_90day))
+
+# 00000178238	MONARREZ, GERMAN, Jan 2025
+tbl_mms01 |> 
+  filter(memberid == '00000178238') |> 
+  select(c(memberid, company_id, region, mos, mms_new, mms_exist, mms_exist_90day)) # checks out, mms_90_day = 0 when mms_new = 1
+
+```
+
+Find new vs established members for March 2024. 
+```{r}
+tbl_mms01_mar_2024 <- 
+  tbl_mms01 |> 
+  filter(mos == 202403 & company_id %in% c('ALTAMED', 'ALTAOC', 'ALTACHLA'))
+
+```
+
+Add Patient IDs, then pull in ACG, then pull in claims. 
+```{r}
+# using Epic tables doesn't work as well 
+# tbl_mms01_mar_2024 |> 
+#   left_join(epic_patient_for_app_crosswalk |> select(c(patient_sid, ez_memb_id)), by = c("memberid" = "ez_memb_id")) |> 
+#   filter(!is.na(patient_sid)) # this loses 100k patients that don't have a patient SID match
+
+tbl_mms01_mar_2024 <- 
+  tbl_mms01_mar_2024 |> 
+  left_join(patient_id_crosswalk |> filter(company_id != "ALTANET") |> select(-company_id), by = c("memberid" = "membid")) |> 
+  filter(!is.na(current_patient_sid))
+
+```
+
+Claims at the patient level, start March 2024, end March 2025
+```{r}
+claim_header_by_patient <- 
+  claim_header |> 
+  filter(date(date_from) >= start_date & date(date_from) <= end_date) |> 
+  mutate(month_year_from = floor_date(as.Date(date_from), "month")) |> 
+  group_by(member_id, month_year_from) |> 
+  summarise(total_cost = sum(total_net))
+  
+```
+
+Plot averages
+```{r}
+plot_cost_by_month <- 
+  claim_header_by_patient |> 
+  left_join(tbl_mms01_mar_2024 |> select(c(memberid, mms_exist_90day)), by = c("member_id" = "memberid")) |> 
+  filter(!is.na(mms_exist_90day)) |> 
+  mutate(mms_exist_90day = as.factor(mms_exist_90day)) |> 
+  group_by(mms_exist_90day, month_year_from) |> 
+  summarise(average_cost = mean(total_cost)) 
+
+plot_cost_by_month |> 
+  ggplot(aes(x = month_year_from, y = average_cost, fill = mms_exist_90day)) + 
+  geom_point(aes(color = mms_exist_90day)) + 
+  geom_smooth(aes(color = mms_exist_90day), se = FALSE)
+
+```
+
+
