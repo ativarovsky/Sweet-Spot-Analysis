@@ -1,0 +1,48 @@
+
+- Epic ID: Z followed by numeric natural key
+	- in DWH, MRN is used (patient primary MRN)
+- Patient SID: DWH master data assigned, shouldn't change for an individual
+- MEMB_MPI_NO = unique EZ cap ID for a patient, regardless of plan (EZ cap version of Patient SID) 
+	- "natural key"
+	- some exceptions but for the most part, we don't expect this to change for an individual
+	- 36 character (GUID) 
+	- example: E3F28D3B-7F73-4DAE-A420-09DC5A74DAE3
+- MEMB_KEYID: when a member is assigned to a health plan, they get this number
+	- this should change if a patient changes plans within a company
+- Company ID: separation of regional data 
+	- EZ Cap has a database for each company, ALTAMED = LA county, ALTAOC = Orange county, ALTACHLA, SBC = 
+	Senior buena care (PACE)
+	- not dependent on plan or line of business
+	- ALTANET: if a patient is RKK (or full risk), they will have an entry with AltaNet and an entry with ALTAMED
+	ALTAOC, ALTACHLA
+	- sometimes a patient is ALTANET only, these patients should mostly be excluded from analysis, they are 
+	part of claims processing (ask Norman Decker) 
+- MembID = Health plan assigned
+	- example: 848A2298070
+	- changes if health plan changes
+	- CIN = MediCal ID
+
+
+Patient SID: DWH master data assigned
+
+Memb MPI NO: EZ Cap number, shouldn't change, sometimes does
+
+- DWH houses natural key for two systems: MRN crosswalsk to Memb MPI number
+
+- Dim All Patient: use current record = Y
+
+// Mtg with Phil
+- Mrn is one to one match Patient Epic ID
+	- MRN is what users see, but Clarity tables are Patient Epic ID based
+- EZ Cap side is more complicated
+	- Memb Key ID = system identifier, plan based, insruance cards
+	- one person has one MPI number, in theory
+	- Member ID = user facing ID on insurance card, if you switch 
+
+- what to roll up to: in EZCap we only roll up to specific 
+
+- patient SID could have two EZ Cap MPI numbers, or five Epir MRNs 
+	- Dim All Patient has source system records that still exist (make sure that 
+	- IPA patients don't have Epic record 
+
+Counting costs: paid per insurance card

@@ -99,7 +99,7 @@ clarity <- DBI::dbConnect(odbc::odbc()
 
 Define interval start date and end date. 
 ```{r}
-start_date <- '2024-03-01'
+start_date <- '2023-03-01'
 end_date <- '2025-03-01'
 
 ```
@@ -190,12 +190,13 @@ tbl_mms01 <-
 
 DimPatient Table to crosswalk patient IDs
 ```{r}
-dim_patient <- 
+dim_all_patient <- 
   altamed_dwh |> 
   tbl(in_schema("dbo", "DimAllPatient")) |> 
-  select(CurrentPatientSID, AllPatientID) |> 
+  select(c(CurrentPatientSID, AllPatientID, CurrentRecordFlag, ETL_CreateDate)) |> 
   collect() |> 
-  janitor::clean_names()
+  janitor::clean_names() |> 
+  mutate(etl_create_date = as.Date(etl_create_date))
 
 memb_company <- 
   datalake |> 
@@ -205,15 +206,45 @@ memb_company <-
   janitor::clean_names()
 
 patient_id_crosswalk <- 
-  dim_patient |> 
+  dim_all_patient |> 
   left_join(memb_company, by = c("all_patient_id" = "memb_mpi_no")) |> 
-  filter(!is.na(membid)) |> 
-  select(c(current_patient_sid, membid, company_id)) |> 
+  filter(!is.na(membid) & current_record_flag == "Y") |> 
   unique()
 
 ```
 
+## Data Validation
 
+We want to make sure that `mms_exist_90day` is in fact an accurate new member variable. We can try to see if a sample of those patients have any prior claims in the claims history. Also check `mms_new`
+
+```{r}
+tbl_mms01_mar_2024 <- 
+  tbl_mms01 |> 
+  filter(mos == 202403 & company_id %in% c('ALTAMED', 'ALTAOC', 'ALTACHLA'))
+
+#sample new patients
+new_patient_sample_mar_2024 <- 
+  tbl_mms01_mar_2024 |> 
+  filter(mms_new == 1) |> 
+  filter(memberid %in% sample(unique(memberid), 500)) |> 
+  select(memberid)
+
+```
+
+
+Check claims for these patients, there should be no claims before March 2024
+```{r}
+claim_header |> 
+  filter(member_id %in% new_patient_sample_mar_2024$memberid) |> 
+  group_by(member_id) |> 
+  summarise(earliest_claim = min(date_from)) |> 
+  arrange(earliest_claim)
+  
+```
+
+Based on the validation exercise, the `mms_exist_90_day` variable is unreliable. The `mms_new` variable is better but still not totally reliable. 
+
+Best approach is to do a second step, where any patient with claims earlier than the month before is removed from anlaysis. 
 
 ## Data Exploration
 ```{r}
@@ -302,17 +333,551 @@ Plot averages
 ```{r}
 plot_cost_by_month <- 
   claim_header_by_patient |> 
-  left_join(tbl_mms01_mar_2024 |> select(c(memberid, mms_exist_90day)), by = c("member_id" = "memberid")) |> 
-  filter(!is.na(mms_exist_90day)) |> 
-  mutate(mms_exist_90day = as.factor(mms_exist_90day)) |> 
-  group_by(mms_exist_90day, month_year_from) |> 
+  left_join(tbl_mms01_mar_2024 |> select(c(memberid, mms_new)), by = c("member_id" = "memberid")) |> 
+  filter(!is.na(mms_new)) |> 
+  mutate(mms_new = as.factor(mms_new)) |> 
+  group_by(mms_new, month_year_from) |> 
   summarise(average_cost = mean(total_cost)) 
 
 plot_cost_by_month |> 
-  ggplot(aes(x = month_year_from, y = average_cost, fill = mms_exist_90day)) + 
-  geom_point(aes(color = mms_exist_90day)) + 
-  geom_smooth(aes(color = mms_exist_90day), se = FALSE)
+  ggplot(aes(x = month_year_from, y = average_cost, fill = mms_new)) + 
+  geom_point(aes(color = mms_new)) + 
+  geom_smooth(aes(color = mms_new), se = FALSE)
 
 ```
 
 
+### Jan 2024 New vs Established
+
+Subset to January
+```{r}
+tbl_mms01_jan_2024 <- 
+  tbl_mms01 |> 
+  filter(mos == 202401 & company_id %in% c('ALTAMED', 'ALTAOC', 'ALTACHLA'))
+
+```
+
+```{r}
+plot_cost_by_month <- 
+  claim_header_by_patient |> 
+  filter(month_year_from >= '2024-01-01') |> 
+  left_join(tbl_mms01_jan_2024 |> select(c(memberid, mms_new)), by = c("member_id" = "memberid")) |> 
+  filter(!is.na(mms_new)) |> 
+  mutate(mms_new = as.factor(mms_new)) |> 
+  group_by(mms_new, month_year_from) |> 
+  summarise(average_cost = mean(total_cost)) 
+
+plot_cost_by_month |> 
+  ggplot(aes(x = month_year_from, y = average_cost, fill = mms_new)) + 
+  geom_point(aes(color = mms_new)) + 
+  geom_smooth(aes(color = mms_new), se = FALSE) + 
+  labs(title = "Jan 2024 New vs Existing Patients", 
+       subtitle = "Avg Cost over Time")
+
+```
+
+
+### Feb 2024 New vs Established
+
+Subset to February
+```{r}
+tbl_mms01_feb_2024 <- 
+  tbl_mms01 |> 
+  filter(mos == 202402 & company_id %in% c('ALTAMED', 'ALTAOC', 'ALTACHLA'))
+
+```
+
+```{r}
+plot_cost_by_month <- 
+  claim_header_by_patient |> 
+  filter(month_year_from >= '2024-02-01') |> 
+  left_join(tbl_mms01_feb_2024 |> select(c(memberid, mms_new)), by = c("member_id" = "memberid")) |> 
+  filter(!is.na(mms_new)) |> 
+  mutate(mms_new = as.factor(mms_new)) |> 
+  group_by(mms_new, month_year_from) |> 
+  summarise(average_cost = mean(total_cost)) 
+
+plot_cost_by_month |> 
+  ggplot(aes(x = month_year_from, y = average_cost, fill = mms_new)) + 
+  geom_point(aes(color = mms_new)) + 
+  geom_smooth(aes(color = mms_new), se = FALSE) + 
+  labs(title = "Feb 2024 New vs Existing Patients", 
+       subtitle = "Avg Cost over Time")
+
+```
+
+
+
+### Mar 2024 New vs Established
+
+Subset to March
+```{r}
+tbl_mms01_mar_2024 <- 
+  tbl_mms01 |> 
+  filter(mos == 202403 & company_id %in% c('ALTAMED', 'ALTAOC', 'ALTACHLA'))
+
+```
+
+```{r}
+plot_cost_by_month <- 
+  claim_header_by_patient |> 
+  filter(month_year_from >= '2024-03-01') |> 
+  left_join(tbl_mms01_mar_2024 |> select(c(memberid, mms_new)), by = c("member_id" = "memberid")) |> 
+  filter(!is.na(mms_new)) |> 
+  mutate(mms_new = as.factor(mms_new)) |> 
+  group_by(mms_new, month_year_from) |> 
+  summarise(average_cost = mean(total_cost)) 
+
+plot_cost_by_month |> 
+  ggplot(aes(x = month_year_from, y = average_cost, fill = mms_new)) + 
+  geom_point(aes(color = mms_new)) + 
+  geom_smooth(aes(color = mms_new), se = FALSE) + 
+  labs(title = "Mar 2024 New vs Existing Patients", 
+       subtitle = "Avg Cost over Time")
+
+```
+
+
+
+
+### Apr 2024 New vs Established
+
+Subset to April
+```{r}
+tbl_mms01_apr_2024 <- 
+  tbl_mms01 |> 
+  filter(mos == 202404 & company_id %in% c('ALTAMED', 'ALTAOC', 'ALTACHLA'))
+
+```
+
+```{r}
+plot_cost_by_month <- 
+  claim_header_by_patient |> 
+  filter(month_year_from >= '2024-04-01') |> 
+  left_join(tbl_mms01_apr_2024 |> select(c(memberid, mms_new)), by = c("member_id" = "memberid")) |> 
+  filter(!is.na(mms_new)) |> 
+  mutate(mms_new = as.factor(mms_new)) |> 
+  group_by(mms_new, month_year_from) |> 
+  summarise(average_cost = mean(total_cost)) 
+
+plot_cost_by_month |> 
+  ggplot(aes(x = month_year_from, y = average_cost, fill = mms_new)) + 
+  geom_point(aes(color = mms_new)) + 
+  geom_smooth(aes(color = mms_new), se = FALSE) + 
+  labs(title = "Apr 2024 New vs Existing Patients", 
+       subtitle = "Avg Cost over Time")
+
+```
+
+
+
+### May 2024 New vs Established
+
+Subset to May
+```{r}
+tbl_mms01_may_2024 <- 
+  tbl_mms01 |> 
+  filter(mos == 202405 & company_id %in% c('ALTAMED', 'ALTAOC', 'ALTACHLA'))
+
+```
+
+```{r}
+plot_cost_by_month <- 
+  claim_header_by_patient |> 
+  filter(month_year_from >= '2024-05-01') |> 
+  left_join(tbl_mms01_may_2024 |> select(c(memberid, mms_new)), by = c("member_id" = "memberid")) |> 
+  filter(!is.na(mms_new)) |> 
+  mutate(mms_new = as.factor(mms_new)) |> 
+  group_by(mms_new, month_year_from) |> 
+  summarise(average_cost = mean(total_cost)) 
+
+plot_cost_by_month |> 
+  ggplot(aes(x = month_year_from, y = average_cost, fill = mms_new)) + 
+  geom_point(aes(color = mms_new)) + 
+  geom_smooth(aes(color = mms_new), se = FALSE) + 
+  labs(title = "May 2024 New vs Existing Patients", 
+       subtitle = "Avg Cost over Time")
+
+```
+
+
+
+### Jun 2024 New vs Established
+
+Subset to June
+```{r}
+tbl_mms01_jun_2024 <- 
+  tbl_mms01 |> 
+  filter(mos == 202406 & company_id %in% c('ALTAMED', 'ALTAOC', 'ALTACHLA'))
+
+```
+
+```{r}
+plot_cost_by_month <- 
+  claim_header_by_patient |> 
+  filter(month_year_from >= '2024-06-01') |> 
+  left_join(tbl_mms01_jun_2024 |> select(c(memberid, mms_new)), by = c("member_id" = "memberid")) |> 
+  filter(!is.na(mms_new)) |> 
+  mutate(mms_new = as.factor(mms_new)) |> 
+  group_by(mms_new, month_year_from) |> 
+  summarise(average_cost = mean(total_cost)) 
+
+plot_cost_by_month |> 
+  ggplot(aes(x = month_year_from, y = average_cost, fill = mms_new)) + 
+  geom_point(aes(color = mms_new)) + 
+  geom_smooth(aes(color = mms_new), se = FALSE) + 
+  labs(title = "Jun 2024 New vs Existing Patients", 
+       subtitle = "Avg Cost over Time")
+
+```
+
+
+##  Import Tables (Updated)
+
+### Jun 2024 Start
+
+Per Steve Wong: patient table and company tables are produced below. 
+
+First, define date of interest (month and year that you want to see new members
+```{r}
+date_of_interest_start <- '2024-06-01'
+date_of_interest_end <- '2024-06-30'
+claims_cutoff <- Sys.Date() - 90
+
+```
+
+
+DimPatient Table to crosswalk patient IDs
+```{r}
+dim_all_patient <- 
+  altamed_dwh |> 
+  tbl(in_schema("dbo", "DimAllPatient")) |> 
+  select(c(CurrentPatientSID, AllPatientID, CurrentRecordFlag, ETL_CreateDate)) |> 
+  collect() |> 
+  janitor::clean_names() |> 
+  mutate(etl_create_date = as.Date(etl_create_date))
+
+memb_company <- 
+  datalake |> 
+  tbl(in_schema("EZCap", "MEMB_COMPANY")) |> 
+  select(c(MEMB_KEYID, MEMB_MPI_NO, MEMBID, COMPANY_ID)) |> 
+  collect() |> 
+  janitor::clean_names()
+
+patient_id_crosswalk <- 
+  dim_all_patient |> 
+  left_join(memb_company, by = c("all_patient_id" = "memb_mpi_no")) |> 
+  filter(!is.na(membid)) |> 
+  unique()
+
+```
+
+
+```{r}
+# datalake patient table 
+memb_hphists <- 
+  datalake |> 
+  tbl(in_schema("ezcap", "memb_hphists")) |> 
+  select(c(MEMB_KEYID, COMPANY_ID, HPCODE, OPFROMDT, OPTHRUDT, LOADDATE)) |> 
+  collect() |> 
+  janitor::clean_names() 
+
+# company table
+memb_company <- 
+  datalake |> 
+  tbl(in_schema("ezcap", "memb_company")) |> 
+  select(c(MEMB_MPI_NO, MEMB_KEYID)) |>
+  collect() |> 
+  janitor::clean_names() 
+
+# join tables
+today_and_future_elig_fq_members <- 
+  memb_hphists |> 
+  inner_join(memb_company, by = "memb_keyid") |> 
+  filter(company_id %in% c('ALTAMED','ALTAOC','ALTACHLA')) |>  #FQ ONLY, EXCLUDE PACE, ALTANET, AND OMNICARE
+  filter(loaddate >= (date_of_interest_start) & loaddate <= date_of_interest_end) |> 
+  mutate(opfromdt_null_test = if_else(is.na(opfromdt), Sys.Date(), opfromdt), 
+         opthrudt_null_test = if_else(is.na(opthrudt), Sys.Date(), opthrudt)
+  ) |> 
+  filter(
+    (Sys.Date() >= opfromdt_null_test & Sys.Date() <= opthrudt_null_test) | Sys.Date() < opfromdt_null_test) |> # eligible today or eligible in future
+  filter(opfromdt_null_test != opthrudt_null_test) |>   # remove eligibility errors
+  select(c(memb_keyid, company_id, hpcode, memb_mpi_no))
+
+```
+
+
+Produce table of unique patients from the above table. Start with `DimPatient` and join to table above
+```{r}
+unique_dwh_ids <- 
+  dim_all_patient |> 
+  inner_join(today_and_future_elig_fq_members, by = c("all_patient_id" = "memb_mpi_no")) |> 
+  select(c(all_patient_id, current_patient_sid)) |> 
+  unique()
+
+```
+
+
+Produce table of unique patients seen by DWH prior to this month regardless of source system
+```{r}
+members_seen_in_system_prior_to_current_month_load <- 
+  unique_dwh_ids |> 
+  inner_join(dim_all_patient |> select(current_patient_sid, etl_create_date), by = "current_patient_sid") |> 
+  filter(etl_create_date < date_of_interest_start) |>  
+  select(c(all_patient_id, current_patient_sid)) |> 
+  unique()
+
+```
+
+New patients loaded this month and never seen before by DWH/AltaMed systems in prior months
+```{r}
+net_new_members_jun_24 <- 
+  today_and_future_elig_fq_members |> 
+  left_join(members_seen_in_system_prior_to_current_month_load, by = c("memb_mpi_no" = "all_patient_id")) |> 
+  filter(is.na(current_patient_sid)) |> 
+  left_join(patient_id_crosswalk |> select(c(current_patient_sid, all_patient_id)), by = c("memb_mpi_no" = "all_patient_id")) |> 
+  select(-c(current_patient_sid.x)) |> 
+  rename(current_patient_sid = current_patient_sid.y)
+
+
+```
+
+### Claims
+
+#### MCANALYTICS Tables 
+
+`MCANALYTICS` claims tables
+```{r}
+claim_header <- 
+  mcanalytics |> 
+  tbl(in_schema("data", "tblClaim_Header")) |> 
+  select(c(ClaimNo, DateCreated, DateFrom, MemberId, CompanyId, TotalNet, PlaceofSvcCode, StatusCode)) |> 
+  filter(DateFrom >= date_of_interest_start & DateFrom < claims_cutoff) |> 
+  filter(CompanyId %in% c("ALTACHLA", "ALTAMED", "ALTANET", "ALTAOC") & StatusCode == '9') |> 
+  collect() |> 
+  janitor::clean_names() |> 
+  filter(!is.na(claim_no))
+  		
+claim_details <-
+  mcanalytics |>
+  tbl(in_schema("data", "tblClaim_Details")) |>
+  select(c(ClaimNo, CompanyId, DateFrom, NetPaid
+           , ProcCode)) |>
+  filter(DateFrom >= date_of_interest_start & DateFrom < claims_cutoff) |>
+  filter(CompanyId %in% c("ALTACHLA", "ALTAMED", "ALTANET", "ALTAOC")) |>
+  collect() |>
+  janitor::clean_names() |>
+  select(-date_from) |>
+  filter(!is.na(claim_no))
+
+```
+
+
+Claims at the patient level, start March 2024, end March 2025
+```{r}
+claim_header_by_patient <- 
+  claim_header |> 
+  mutate(month_year_from = floor_date(as.Date(date_from), "month")) |> 
+  group_by(member_id, month_year_from) |> 
+  summarise(total_cost = sum(total_net)) 
+
+```
+
+Produce claims dataset with new and existing patients
+```{r}
+cost_by_month_jun_2024 <- 
+  claim_header_by_patient |> 
+  filter(month_year_from >= '2024-06-01') |> 
+  left_join(patient_id_crosswalk |> select(c(current_patient_sid, membid)) |> unique(), by = c("member_id" = "membid")) |> 
+  filter(!is.na(current_patient_sid)) |> 
+  left_join(net_new_members_jun_24, by = "current_patient_sid") |> 
+  mutate(new_patient = if_else(is.na(memb_keyid), "N", "Y"))
+
+  
+```
+
+
+
+
+
+### Jan 2024 Start
+
+
+First, define date of interest (month and year that you want to see new members
+```{r}
+date_of_interest_start <- '2024-01-01'
+date_of_interest_end <- '2024-01-31'
+
+```
+
+
+DimPatient Table to crosswalk patient IDs
+```{r}
+dim_all_patient <- 
+  altamed_dwh |> 
+  tbl(in_schema("dbo", "DimAllPatient")) |> 
+  select(c(CurrentPatientSID, AllPatientID, CurrentRecordFlag, ETL_CreateDate)) |> 
+  collect() |> 
+  janitor::clean_names() |> 
+  mutate(etl_create_date = as.Date(etl_create_date))
+
+memb_company <- 
+  datalake |> 
+  tbl(in_schema("EZCap", "MEMB_COMPANY")) |> 
+  select(c(MEMB_KEYID, MEMB_MPI_NO, MEMBID, COMPANY_ID)) |> 
+  collect() |> 
+  janitor::clean_names()
+
+patient_id_crosswalk <- 
+  dim_all_patient |> 
+  left_join(memb_company, by = c("all_patient_id" = "memb_mpi_no")) |> 
+  filter(!is.na(membid)) |> 
+  unique()
+
+```
+
+
+```{r}
+# datalake patient table 
+memb_hphists <- 
+  datalake |> 
+  tbl(in_schema("ezcap", "memb_hphists")) |> 
+  select(c(MEMB_KEYID, COMPANY_ID, HPCODE, OPFROMDT, OPTHRUDT, LOADDATE)) |> 
+  collect() |> 
+  janitor::clean_names() 
+
+# company table
+memb_company <- 
+  datalake |> 
+  tbl(in_schema("ezcap", "memb_company")) |> 
+  select(c(MEMB_MPI_NO, MEMB_KEYID)) |>
+  collect() |> 
+  janitor::clean_names() 
+
+# join tables
+today_and_future_elig_fq_members <- 
+  memb_hphists |> 
+  inner_join(memb_company, by = "memb_keyid") |> 
+  filter(company_id %in% c('ALTAMED','ALTAOC','ALTACHLA')) |>  #FQ ONLY, EXCLUDE PACE, ALTANET, AND OMNICARE
+  filter(loaddate >= (date_of_interest_start) & loaddate <= date_of_interest_end) |> 
+  mutate(opfromdt_null_test = if_else(is.na(opfromdt), Sys.Date(), opfromdt), 
+         opthrudt_null_test = if_else(is.na(opthrudt), Sys.Date(), opthrudt)
+  ) |> 
+  filter(
+    (Sys.Date() >= opfromdt_null_test & Sys.Date() <= opthrudt_null_test) | Sys.Date() < opfromdt_null_test) |> # eligible today or eligible in future
+  filter(opfromdt_null_test != opthrudt_null_test) |>   # remove eligibility errors
+  select(c(memb_keyid, company_id, hpcode, memb_mpi_no))
+
+```
+
+
+Produce table of unique patients from the above table. Start with `DimPatient` and join to table above
+```{r}
+unique_dwh_ids <- 
+  dim_all_patient |> 
+  inner_join(today_and_future_elig_fq_members, by = c("all_patient_id" = "memb_mpi_no")) |> 
+  select(c(all_patient_id, current_patient_sid)) |> 
+  unique()
+
+```
+
+
+Produce table of unique patients seen by DWH prior to this month regardless of source system
+```{r}
+members_seen_in_system_prior_to_current_month_load <- 
+  unique_dwh_ids |> 
+  inner_join(dim_all_patient |> select(current_patient_sid, etl_create_date), by = "current_patient_sid") |> 
+  filter(etl_create_date < date_of_interest_start) |>  
+  select(c(all_patient_id, current_patient_sid)) |> 
+  unique()
+
+```
+
+New patients loaded this month and never seen before by DWH/AltaMed systems in prior months
+```{r}
+net_new_members_jun_24 <- 
+  today_and_future_elig_fq_members |> 
+  left_join(members_seen_in_system_prior_to_current_month_load, by = c("memb_mpi_no" = "all_patient_id")) |> 
+  filter(is.na(current_patient_sid)) |> 
+  left_join(patient_id_crosswalk |> select(c(current_patient_sid, all_patient_id)), by = c("memb_mpi_no" = "all_patient_id")) |> 
+  select(-c(current_patient_sid.x)) |> 
+  rename(current_patient_sid = current_patient_sid.y)
+
+
+```
+
+### Claims
+
+#### MCANALYTICS Tables 
+
+`MCANALYTICS` claims tables
+```{r}
+claim_header <- 
+  mcanalytics |> 
+  tbl(in_schema("data", "tblClaim_Header")) |> 
+  select(c(ClaimNo, DateCreated, DateFrom, MemberId, CompanyId, TotalNet, PlaceofSvcCode, StatusCode)) |> 
+  filter(DateFrom >= date_of_interest_start & DateFrom < claims_cutoff) |> 
+  filter(CompanyId %in% c("ALTACHLA", "ALTAMED", "ALTANET", "ALTAOC") & StatusCode == '9') |> 
+  collect() |> 
+  janitor::clean_names() |> 
+  filter(!is.na(claim_no))
+  		
+claim_details <-
+  mcanalytics |>
+  tbl(in_schema("data", "tblClaim_Details")) |>
+  select(c(ClaimNo, CompanyId, DateFrom, NetPaid
+           , ProcCode)) |>
+  filter(DateFrom >= date_of_interest_start & DateFrom < claims_cutoff) |>
+  filter(CompanyId %in% c("ALTACHLA", "ALTAMED", "ALTANET", "ALTAOC")) |>
+  collect() |>
+  janitor::clean_names() |>
+  select(-date_from) |>
+  filter(!is.na(claim_no))
+
+```
+
+
+Claims at the patient level, start March 2024, end March 2025
+```{r}
+claim_header_by_patient <- 
+  claim_header |> 
+  mutate(month_year_from = floor_date(as.Date(date_from), "month")) |> 
+  group_by(member_id, month_year_from) |> 
+  summarise(total_cost = sum(total_net)) 
+
+```
+
+
+Produce claims dataset with new and existing patients
+```{r}
+cost_by_month_jun_2024 <- 
+  claim_header_by_patient |> 
+  filter(month_year_from >= '2024-06-01') |> 
+  left_join(patient_id_crosswalk |> select(c(current_patient_sid, membid)) |> unique(), by = c("member_id" = "membid")) |> 
+  filter(!is.na(current_patient_sid)) |> 
+  left_join(net_new_members_jun_24, by = "current_patient_sid") |> 
+  mutate(new_patient = if_else(is.na(memb_keyid), "N", "Y"))
+
+  
+```
+
+
+
+## Exploratory Data Analysis
+
+Plot cost curves for new vs existing patients, Jun 2024
+```{r}
+grouped_cost_by_month_patient_status <- 
+  cost_by_month_jun_2024 |> 
+  select(c(month_year_from, total_cost, new_patient)) |> 
+  group_by(new_patient, month_year_from) |> 
+  summarise(average_cost = mean(total_cost)) 
+
+grouped_cost_by_month_patient_status |> 
+  ggplot(aes(x = month_year_from, y = average_cost, fill = new_patient)) + 
+  geom_point(aes(color = new_patient)) + 
+  geom_smooth(aes(color = new_patient), se = FALSE) + 
+  labs(title = "Jun 2024 New vs Existing Patients", 
+       subtitle = "Avg Cost over Time")
+
+```
