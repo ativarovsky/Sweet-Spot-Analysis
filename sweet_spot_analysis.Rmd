@@ -130,10 +130,7 @@ claim_details <-
   select(-date_from) |>
   filter(!is.na(claim_no))
 
-```
-
-Claims at the patient level
-```{r}
+# Claims at the patient level
 claim_header_by_patient <- 
   claim_header |> 
   mutate(month_year_from = floor_date(as.Date(date_from), "month")) |> 
@@ -170,6 +167,7 @@ patient_id_crosswalk <-
 ```
 
 
+### Datalake Tables for New Patient Identification
 ```{r}
 # datalake patient table 
 memb_hphists <- 
@@ -190,88 +188,9 @@ memb_company <-
 ```
 
 
-### June 2024 Dataset
-
-Define date of interest (month and year that you want to see new members
-```{r}
-date_of_interest_start <- '2024-06-01'
-date_of_interest_end <- '2024-06-30'
-
-```
-
-
-```{r}
-# join tables
-today_and_future_elig_fq_members <- 
-  memb_hphists |> 
-  inner_join(memb_company, by = "memb_keyid") |> 
-  filter(company_id %in% c('ALTAMED','ALTAOC','ALTACHLA')) |>  #FQ ONLY, EXCLUDE PACE, ALTANET, AND OMNICARE
-  filter(loaddate >= (date_of_interest_start) & loaddate <= date_of_interest_end) |> 
-  mutate(opfromdt_null_test = if_else(is.na(opfromdt), Sys.Date(), opfromdt), 
-         opthrudt_null_test = if_else(is.na(opthrudt), Sys.Date(), opthrudt)
-  ) |> 
-  filter(
-    (Sys.Date() >= opfromdt_null_test & Sys.Date() <= opthrudt_null_test) | Sys.Date() < opfromdt_null_test) |> # eligible today or eligible in future
-  filter(opfromdt_null_test != opthrudt_null_test) |>   # remove eligibility errors
-  select(c(memb_keyid, company_id, hpcode, memb_mpi_no))
-
-```
-
-
-Produce table of unique patients from the above table. Start with `DimPatient` and join to table above
-```{r}
-unique_dwh_ids <- 
-  dim_all_patient |> 
-  inner_join(today_and_future_elig_fq_members, by = c("all_patient_id" = "memb_mpi_no")) |> 
-  select(c(all_patient_id, current_patient_sid)) |> 
-  unique()
-
-```
-
-
-Produce table of unique patients seen by DWH prior to this month regardless of source system
-```{r}
-members_seen_in_system_prior_to_current_month_load <- 
-  unique_dwh_ids |> 
-  inner_join(dim_all_patient |> select(current_patient_sid, etl_create_date), by = "current_patient_sid") |> 
-  filter(etl_create_date < date_of_interest_start) |>  
-  select(c(all_patient_id, current_patient_sid)) |> 
-  unique()
-
-```
-
-
-New patients loaded this month and never seen before by DWH/AltaMed systems in prior months
-```{r}
-net_new_members_jun_24 <- 
-  today_and_future_elig_fq_members |> 
-  left_join(members_seen_in_system_prior_to_current_month_load, by = c("memb_mpi_no" = "all_patient_id")) |> 
-  filter(is.na(current_patient_sid)) |> 
-  left_join(patient_id_crosswalk |> select(c(current_patient_sid, all_patient_id)), by = c("memb_mpi_no" = "all_patient_id")) |> 
-  select(-c(current_patient_sid.x)) |> 
-  rename(current_patient_sid = current_patient_sid.y)
-
-
-```
-
-
-Produce claims dataset with new and existing patients
-```{r}
-cost_by_month_jun_2024 <- 
-  claim_header_by_patient |> 
-  filter(month_year_from >= date_of_interest_start) |> 
-  left_join(patient_id_crosswalk |> select(c(current_patient_sid, membid)) |> unique(), by = c("member_id" = "membid")) |> 
-  filter(!is.na(current_patient_sid)) |> 
-  left_join(net_new_members_jun_24, by = "current_patient_sid") |> 
-  mutate(new_patient = if_else(is.na(memb_keyid), "N", "Y"))
-
-  
-```
-
-
 ### January 2024 Dataset
 
-First, define date of interest (month and year that you want to see new members
+First, define date of interest (month and year for new member analysis)
 ```{r}
 date_of_interest_start <- '2024-01-01'
 date_of_interest_end <- '2024-01-31'
@@ -296,37 +215,119 @@ today_and_future_elig_fq_members_jan_2024 <-
 
 ```
 
-
-Produce table of unique patients seen by DWH prior to this month regardless of source system
+Produce table of unique patients from the above table. Start with `DimPatient` and join to table above
 ```{r}
-members_seen_in_system_prior_to_current_month_load_jan_2024 <- 
-  unique_dwh_ids |> 
-  inner_join(dim_all_patient |> select(current_patient_sid, etl_create_date), by = "current_patient_sid") |> 
-  filter(etl_create_date < date_of_interest_start) |>  
+unique_dwh_ids_jan_2024 <- 
+  dim_all_patient |> 
+  inner_join(today_and_future_elig_fq_members_jan_2024, by = c("all_patient_id" = "memb_mpi_no")) |> 
   select(c(all_patient_id, current_patient_sid)) |> 
   unique()
 
 ```
 
-New patients loaded this month and never seen before by DWH/AltaMed systems in prior months
+Produce table of unique patients seen by DWH prior to this month regardless of source system
 ```{r}
+members_seen_in_system_prior_to_current_month_load_jan_2024 <- 
+  unique_dwh_ids_jan_2024 |> 
+  inner_join(dim_all_patient |> select(current_patient_sid, etl_create_date), by = "current_patient_sid") |> 
+  filter(etl_create_date < date_of_interest_start) |>  
+  select(c(all_patient_id, current_patient_sid)) |> 
+  unique()
+
+# New patients loaded this month and never seen before by DWH/AltaMed systems in prior months
 net_new_members_jan_24 <- 
-  today_and_future_elig_fq_members |> 
-  left_join(members_seen_in_system_prior_to_current_month_load, by = c("memb_mpi_no" = "all_patient_id")) |> 
+  today_and_future_elig_fq_members_jan_2024 |> 
+  left_join(members_seen_in_system_prior_to_current_month_load_jan_2024, by = c("memb_mpi_no" = "all_patient_id")) |> 
   filter(is.na(current_patient_sid)) |> 
   left_join(patient_id_crosswalk |> select(c(current_patient_sid, all_patient_id)), by = c("memb_mpi_no" = "all_patient_id")) |> 
   select(-c(current_patient_sid.x)) |> 
   rename(current_patient_sid = current_patient_sid.y)
 
+
+```
+
+
+Claims table with new and existing patients
+```{r}
+cost_by_month_jan_2024 <- 
+  claim_header_by_patient |> 
+  filter(month_year_from >= date_of_interest_start) |> 
+  left_join(patient_id_crosswalk |> select(c(current_patient_sid, membid)) |> unique(), by = c("member_id" = "membid")) |> 
+  filter(!is.na(current_patient_sid)) |> 
+  left_join(net_new_members_jan_24, by = "current_patient_sid") |> 
+  mutate(new_patient = if_else(is.na(memb_keyid), "N", "Y"))
+
+  
 ```
 
 
 
+### June 2024 Dataset
+
+Define date of interest (month and year that you want to see new members
+```{r}
+date_of_interest_start <- '2024-06-01'
+date_of_interest_end <- '2024-06-30'
+
+```
+
+
+```{r}
+# join tables
+today_and_future_elig_fq_members_jun_2024 <- 
+  memb_hphists |> 
+  inner_join(memb_company, by = "memb_keyid") |> 
+  filter(company_id %in% c('ALTAMED','ALTAOC','ALTACHLA')) |>  #FQ ONLY, EXCLUDE PACE, ALTANET, AND OMNICARE
+  filter(loaddate >= (date_of_interest_start) & loaddate <= date_of_interest_end) |> 
+  mutate(opfromdt_null_test = if_else(is.na(opfromdt), Sys.Date(), opfromdt), 
+         opthrudt_null_test = if_else(is.na(opthrudt), Sys.Date(), opthrudt)
+  ) |> 
+  filter(
+    (Sys.Date() >= opfromdt_null_test & Sys.Date() <= opthrudt_null_test) | Sys.Date() < opfromdt_null_test) |> # eligible today or eligible in future
+  filter(opfromdt_null_test != opthrudt_null_test) |>   # remove eligibility errors
+  select(c(memb_keyid, company_id, hpcode, memb_mpi_no))
+
+```
+
+
+Produce table of unique patients from the above table. Start with `DimPatient` and join to table above
+```{r}
+unique_dwh_ids_jun_2024 <- 
+  dim_all_patient |> 
+  inner_join(today_and_future_elig_fq_members_jun_2024, by = c("all_patient_id" = "memb_mpi_no")) |> 
+  select(c(all_patient_id, current_patient_sid)) |> 
+  unique()
+
+```
+
+
+Produce table of unique patients seen by DWH prior to this month regardless of source system
+```{r}
+members_seen_in_system_prior_to_current_month_load_jun_2024 <- 
+  unique_dwh_ids_jun_2024 |> 
+  inner_join(dim_all_patient |> select(current_patient_sid, etl_create_date), by = "current_patient_sid") |> 
+  filter(etl_create_date < date_of_interest_start) |>  
+  select(c(all_patient_id, current_patient_sid)) |> 
+  unique()
+
+# New patients loaded this month and never seen before by DWH/AltaMed systems in prior months
+net_new_members_jun_24 <- 
+  today_and_future_elig_fq_members_jun_2024 |> 
+  left_join(members_seen_in_system_prior_to_current_month_load_jun_2024, by = c("memb_mpi_no" = "all_patient_id")) |> 
+  filter(is.na(current_patient_sid)) |> 
+  left_join(patient_id_crosswalk |> select(c(current_patient_sid, all_patient_id)), by = c("memb_mpi_no" = "all_patient_id")) |> 
+  select(-c(current_patient_sid.x)) |> 
+  rename(current_patient_sid = current_patient_sid.y)
+
+
+```
+
+
 Produce claims dataset with new and existing patients
 ```{r}
-cost_by_month_jan_2024 <- 
+cost_by_month_jun_2024 <- 
   claim_header_by_patient |> 
-  filter(month_year_from >= '2024-06-01') |> 
+  filter(month_year_from >= date_of_interest_start) |> 
   left_join(patient_id_crosswalk |> select(c(current_patient_sid, membid)) |> unique(), by = c("member_id" = "membid")) |> 
   filter(!is.na(current_patient_sid)) |> 
   left_join(net_new_members_jun_24, by = "current_patient_sid") |> 
@@ -337,11 +338,71 @@ cost_by_month_jan_2024 <-
 
 
 
+
 ## Exploratory Data Analysis
+
+### Jan 2024 New vs Existing
+
+Plot cost curves for new vs existing patients
+```{r}
+grouped_cost_by_month_patient_status <- 
+  cost_by_month_jan_2024 |> 
+  select(c(month_year_from, total_cost, new_patient, lob_name)) |> 
+  group_by(new_patient, month_year_from) |> 
+  summarise(average_cost = mean(total_cost)) 
+
+
+grouped_cost_by_month_patient_status |> 
+  ggplot(aes(x = month_year_from, y = average_cost, fill = new_patient)) + 
+  geom_point(aes(color = new_patient)) + 
+  geom_smooth(aes(color = new_patient), se = FALSE) + 
+  labs(title = "New vs Existing Patients", 
+       subtitle = "Avg Cost over Time")
+
+```
+
+
+Med-Cal Only 
+```{r}
+grouped_cost_by_month_patient_status_medi_cal <- 
+  cost_by_month_jan_2024 |>
+  filter(lob_name == "Medi-Cal") |> 
+  select(c(month_year_from, total_cost, new_patient, lob_name)) |> 
+  group_by(new_patient, month_year_from) |> 
+  summarise(average_cost = mean(total_cost)) 
+
+grouped_cost_by_month_patient_status_medi_cal |> 
+  ggplot(aes(x = month_year_from, y = average_cost, fill = new_patient)) + 
+  geom_point(aes(color = new_patient)) + 
+  geom_smooth(aes(color = new_patient), se = FALSE) + 
+  labs(title = "New vs Existing Patients (Medi-Cal Only)", 
+       subtitle = "Avg Cost over Time")
+
+```
+
+
+Medicare Only 
+```{r}
+grouped_cost_by_month_patient_status_medicare <- 
+  cost_by_month_jan_2024 |>
+  filter(lob_name == "Medicare") |> 
+  select(c(month_year_from, total_cost, new_patient, lob_name)) |> 
+  group_by(new_patient, month_year_from) |> 
+  summarise(average_cost = mean(total_cost)) 
+
+grouped_cost_by_month_patient_status_medicare |> 
+  ggplot(aes(x = month_year_from, y = average_cost, fill = new_patient)) + 
+  geom_point(aes(color = new_patient)) + 
+  geom_smooth(aes(color = new_patient), se = FALSE) + 
+  labs(title = "New vs Existing Patients (MediCare Only)", 
+       subtitle = "Avg Cost over Time")
+
+```
+
 
 ### June 2024 New vs Existing
 
-Plot cost curves for new vs existing patients, Jun 2024
+Plot cost curves for new vs existing patients. 
 ```{r}
 grouped_cost_by_month_patient_status <- 
   cost_by_month_jun_2024 |> 
